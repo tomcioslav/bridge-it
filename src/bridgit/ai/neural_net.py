@@ -1,0 +1,111 @@
+"""ResNet-based neural network for Bridgit (policy + value heads).
+
+Input:  GameState.to_tensor(player) → shape (3, g, g) where g = 2n-1
+  - Channel 0: current player's edges
+  - Channel 1: opponent's edges
+  - Channel 2: playability mask (1 at edge positions)
+Output: (log_policy, value)
+  - log_policy: shape (g, g) — log probabilities over board positions
+  - value: shape (1,) — position evaluation in [-1, 1]
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from bridgit.game import GameState, Player
+
+
+class ResBlock(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return F.relu(out + residual)
+
+
+class BridgitNet(nn.Module):
+    """ResNet with dual policy/value heads for Bridgit.
+
+    Takes a (batch, 3, g, g) tensor where g = 2*board_size - 1.
+    Returns (log_policy, value):
+      - log_policy: (batch, g, g) log-softmax over board positions
+      - value: (batch, 1) tanh-scaled position evaluation
+    """
+
+    def __init__(self, board_size: int = 5, num_channels: int = 64, num_res_blocks: int = 4):
+        super().__init__()
+        self.board_size = board_size
+        g = 2 * board_size + 1
+        ch = num_channels
+
+        # Initial convolution: 3 input channels (mine, theirs, playable)
+        self.conv_init = nn.Conv2d(3, ch, 3, padding=1, bias=False)
+        self.bn_init = nn.BatchNorm2d(ch)
+
+        # Residual tower
+        self.res_blocks = nn.Sequential(*[ResBlock(ch) for _ in range(num_res_blocks)])
+
+        # Policy head: conv down to 1 channel → (batch, g, g)
+        self.policy_conv = nn.Conv2d(ch, 1, 1)
+
+        # Value head
+        self.value_conv = nn.Conv2d(ch, 1, 1, bias=False)
+        self.value_bn = nn.BatchNorm2d(1)
+        self.value_fc1 = nn.Linear(g * g, 64)
+        self.value_fc2 = nn.Linear(64, 1)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # x: (batch, 3, g, g) where g = 2n-1
+        out = F.relu(self.bn_init(self.conv_init(x)))
+        out = self.res_blocks(out)
+
+        # Policy head → (batch, g, g)
+        p = self.policy_conv(out).squeeze(1)
+        p = F.log_softmax(p.flatten(1), dim=1).view_as(p)
+
+        # Value head
+        v = F.relu(self.value_bn(self.value_conv(out)))
+        v = v.view(v.size(0), -1)
+        v = F.relu(self.value_fc1(v))
+        v = torch.tanh(self.value_fc2(v))
+
+        return p, v
+
+
+class NetWrapper:
+    """Thin wrapper around BridgitNet: device handling and inference."""
+
+    def __init__(self, model: BridgitNet):
+        if torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
+
+        self.model = model.to(self.device)
+
+    def make_move(self, state: GameState, player: Player) -> tuple[int, int]:
+        """Pick the best legal move. Returns (row, col)."""
+        self.model.eval()
+        tensor = state.to_tensor(player).unsqueeze(0).to(self.device)  # (1, 3, g, g)
+        mask = state.to_mask()  # (g, g)
+
+        with torch.no_grad():
+            log_policy, _ = self.model(tensor)
+
+        # Mask illegal moves and pick the best one
+        log_policy = log_policy[0].cpu()  # (g, g)
+        log_policy = log_policy.masked_fill(mask == 0, float("-inf"))
+        g = 2 * state.n + 1
+        idx = log_policy.argmax().item()
+        return idx // g, idx % g
+
