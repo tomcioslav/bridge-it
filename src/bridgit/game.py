@@ -64,8 +64,6 @@ class GameState:
     @staticmethod
     def bridge_direction(player: Player, col: int) -> str:
         """Return 'v' or 'h' for this player at this column.
-
-        On the (2n+1) grid, parity is flipped vs the (2n-1) rule:
           Green (VERTICAL):  even col → horizontal,  odd col → vertical
           Red (HORIZONTAL):  even col → vertical,    odd col → horizontal
         """
@@ -279,6 +277,8 @@ class Bridgit:
         self.current_player = Player.HORIZONTAL
         self.winner: Player | None = None
         self.game_over = False
+        self.move_count = 0          # total moves played
+        self.moves_left_in_turn = 1  # first player gets 1 move, then 2 each
 
     @property
     def grid(self) -> np.ndarray:
@@ -304,13 +304,16 @@ class Bridgit:
         if not self.is_valid_move(row, col):
             return False
         self.state = self.state.make_move(row, col, self.current_player)
+        self.move_count += 1
+        self.moves_left_in_turn -= 1
         if self._check_winner():
             self.winner = self.current_player
             self.game_over = True
-        else:
+        elif self.moves_left_in_turn == 0:
             self.current_player = (
                 Player.VERTICAL if self.current_player == Player.HORIZONTAL else Player.HORIZONTAL
             )
+            self.moves_left_in_turn = 2
         return True
 
     def _check_winner(self) -> bool:
@@ -370,6 +373,8 @@ class Bridgit:
         new_game.current_player = self.current_player
         new_game.winner = self.winner
         new_game.game_over = self.game_over
+        new_game.move_count = self.move_count
+        new_game.moves_left_in_turn = self.moves_left_in_turn
         return new_game
 
     def visualize(self):

@@ -38,5 +38,9 @@ class Config:
     checkpoint_dir: str = "checkpoints"
 
     @property
+    def grid_size(self) -> int:
+        return 2 * self.board_size + 1
+
+    @property
     def action_size(self) -> int:
-        return self.board_size * self.board_size
+        return self.grid_size * self.grid_size

@@ -3,11 +3,12 @@
 import math
 
 import numpy as np
+import torch
 
 from bridgit.game import Bridgit
 from bridgit.ai.config import Config
 from bridgit.ai.game_wrapper import GameWrapper
-from bridgit.ai.neural_net import NeuralNetWrapper
+from bridgit.ai.neural_net import NetWrapper
 
 
 class MCTSNode:
@@ -20,7 +21,7 @@ class MCTSNode:
                  action: int | None = None, prior: float = 0.0):
         self.game = game
         self.parent = parent
-        self.action = action  # action that led to this node
+        self.action = action
         self.children: dict[int, MCTSNode] = {}
         self.visit_count = 0
         self.value_sum = 0.0
@@ -47,41 +48,53 @@ class MCTSNode:
 class MCTS:
     """Monte Carlo Tree Search guided by a neural network."""
 
-    def __init__(self, neural_net: NeuralNetWrapper, config: Config):
-        self.neural_net = neural_net
+    def __init__(self, net_wrapper: NetWrapper, config: Config):
+        self.net_wrapper = net_wrapper
         self.config = config
         self.game_wrapper = GameWrapper(config.board_size)
 
-    def search(self, game: Bridgit) -> np.ndarray:
-        """Run MCTS simulations and return move probabilities.
+    def _predict(self, game: Bridgit) -> tuple[np.ndarray, float]:
+        """Run neural net on game state.
 
         Returns:
-            policy: np.ndarray of shape (action_size,) — visit count distribution
+            policy: np.ndarray of shape (action_size,) — probabilities
+            value: float — position evaluation for current player
+        """
+        model = self.net_wrapper.model
+        device = self.net_wrapper.device
+
+        model.eval()
+        tensor = self.game_wrapper.get_state_tensor(game).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            log_policy, value = model(tensor)
+
+        # log_policy: (1, g, g) → flatten to (g*g,)
+        policy = torch.exp(log_policy[0]).cpu().numpy().flatten()
+        val = value[0].item()
+
+        return policy, val
+
+    def search(self, game: Bridgit) -> np.ndarray:
+        """Run MCTS simulations and return visit counts.
+
+        Returns:
+            visits: np.ndarray of shape (action_size,)
         """
         root = MCTSNode(game.copy())
-
-        # Expand root
         self._expand(root)
-
-        # Add Dirichlet noise to root priors
         self._add_dirichlet_noise(root)
 
-        # Run simulations
         for _ in range(self.config.num_mcts_sims):
             node = root
 
-            # SELECT: walk tree until reaching an unexpanded or terminal node
+            # SELECT
             while node.is_expanded and node.children:
                 node = node.best_child(self.config.c_puct)
 
-            # If terminal, backprop the game result
+            # TERMINAL — current_player is the winner (turn doesn't switch on win)
             if node.game.game_over:
-                # Value from the perspective of the node's parent's player
-                # (the player who made the move leading to this terminal state)
-                result = self.game_wrapper.get_game_result(node.game, node.game.current_player)
-                # game_over means the *previous* player won, so current player lost
-                value = -1.0
-                self._backpropagate(node, value)
+                self._backpropagate(node, 1.0)
                 continue
 
             # EXPAND & EVALUATE
@@ -90,66 +103,60 @@ class MCTS:
             # BACKPROPAGATE
             self._backpropagate(node, value)
 
-        # Build policy from visit counts
-        action_size = self.config.action_size
-        visits = np.zeros(action_size, dtype=np.float32)
+        # Collect visit counts
+        visits = np.zeros(self.config.action_size, dtype=np.float32)
         for action, child in root.children.items():
             visits[action] = child.visit_count
 
         return visits
 
     def _expand(self, node: MCTSNode) -> float:
-        """Expand a node using the neural network.
-
-        Returns:
-            value: float — neural network's value estimate for this position
-                   from the perspective of the current player
-        """
-        # Terminal nodes: don't expand, return game result
+        """Expand node using neural network. Returns value estimate."""
         if node.game.game_over:
             node.is_expanded = True
-            # The previous player won, so the current player (whose turn it would be) lost
-            return -1.0
+            return 1.0  # current_player is the winner
 
-        state_tensor = self.game_wrapper.get_state_tensor(node.game)
-        policy, value = self.neural_net.predict(state_tensor)
-
+        policy, value = self._predict(node.game)
         valid_mask = self.game_wrapper.get_valid_moves_mask(node.game)
-        policy = policy * valid_mask
 
+        # Mask and renormalize policy
+        policy = policy * valid_mask
         policy_sum = policy.sum()
         if policy_sum > 0:
             policy = policy / policy_sum
         else:
-            # If no valid moves have probability, use uniform over valid moves
             total = valid_mask.sum()
             if total > 0:
                 policy = valid_mask / total
             else:
-                # No valid moves at all (shouldn't happen if game_over check above works)
                 node.is_expanded = True
                 return value
 
-        # Create child nodes for each valid action
-        for action in range(self.config.action_size):
-            if valid_mask[action] > 0:
-                child_game = self.game_wrapper.get_next_state(node.game, action)
-                child = MCTSNode(child_game, parent=node, action=action, prior=policy[action])
-                node.children[action] = child
+        # Create children for valid actions
+        for action in np.nonzero(valid_mask)[0]:
+            child_game = self.game_wrapper.get_next_state(node.game, int(action))
+            child = MCTSNode(child_game, parent=node, action=int(action), prior=policy[action])
+            node.children[int(action)] = child
 
         node.is_expanded = True
         return value
 
     def _backpropagate(self, node: MCTSNode, value: float):
-        """Backpropagate value up the tree, flipping sign at each level."""
+        """Backpropagate value, flipping sign only when the player changes.
+
+        With the 1-2-2 turn structure, consecutive nodes may belong to the
+        same player. We only negate the value when crossing a player boundary.
+        """
         while node is not None:
             node.visit_count += 1
             node.value_sum += value
-            value = -value  # flip for opponent
+            if (node.parent is not None
+                    and node.game.current_player != node.parent.game.current_player):
+                value = -value
             node = node.parent
 
     def _add_dirichlet_noise(self, node: MCTSNode):
-        """Add Dirichlet noise to root node priors for exploration."""
+        """Add Dirichlet noise to root priors for exploration."""
         if not node.children:
             return
         actions = list(node.children.keys())
@@ -165,9 +172,7 @@ class MCTS:
 
         Args:
             game: current game state
-            temperature: controls exploration.
-                1.0 = proportional to visit counts (exploratory)
-                0.0 = argmax (greedy)
+            temperature: 1.0 = proportional to visits, 0.0 = greedy
 
         Returns:
             probs: np.ndarray of shape (action_size,) summing to 1
@@ -175,15 +180,13 @@ class MCTS:
         visit_counts = self.search(game)
 
         if temperature == 0:
-            # Greedy: pick the most visited action
             best = np.argmax(visit_counts)
             probs = np.zeros_like(visit_counts)
             probs[best] = 1.0
             return probs
 
-        # Temperature-scaled distribution
         counts = visit_counts ** (1.0 / temperature)
         total = counts.sum()
         if total == 0:
-            return visit_counts  # fallback
+            return visit_counts
         return counts / total
