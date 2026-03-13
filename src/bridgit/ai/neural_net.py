@@ -13,7 +13,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from bridgit.game import GameState, Player
+from bridgit.game import Bridgit
+from bridgit.schema import Move
+from bridgit.config import BoardConfig, NeuralNetConfig
 
 
 class ResBlock(nn.Module):
@@ -40,18 +42,18 @@ class BridgitNet(nn.Module):
       - value: (batch, 1) tanh-scaled position evaluation
     """
 
-    def __init__(self, board_size: int = 5, num_channels: int = 64, num_res_blocks: int = 4):
+    def __init__(self, board: BoardConfig = BoardConfig(), net: NeuralNetConfig = NeuralNetConfig()):
         super().__init__()
-        self.board_size = board_size
-        g = 2 * board_size + 1
-        ch = num_channels
+        self.board_config = board
+        g = board.grid_size
+        ch = net.num_channels
 
         # Initial convolution: 3 input channels (mine, theirs, playable)
         self.conv_init = nn.Conv2d(3, ch, 3, padding=1, bias=False)
         self.bn_init = nn.BatchNorm2d(ch)
 
         # Residual tower
-        self.res_blocks = nn.Sequential(*[ResBlock(ch) for _ in range(num_res_blocks)])
+        self.res_blocks = nn.Sequential(*[ResBlock(ch) for _ in range(net.num_res_blocks)])
 
         # Policy head: conv down to 1 channel → (batch, g, g)
         self.policy_conv = nn.Conv2d(ch, 1, 1)
@@ -93,11 +95,11 @@ class NetWrapper:
 
         self.model = model.to(self.device)
 
-    def make_move(self, state: GameState, player: Player) -> tuple[int, int]:
-        """Pick the best legal move. Returns (row, col)."""
+    def make_move(self, game: Bridgit) -> Move:
+        """Pick the best legal move."""
         self.model.eval()
-        tensor = state.to_tensor(player).unsqueeze(0).to(self.device)  # (1, 3, g, g)
-        mask = state.to_mask()  # (g, g)
+        tensor = game.to_tensor().unsqueeze(0).to(self.device)  # (1, 3, g, g)
+        mask = game.to_mask()  # (g, g)
 
         with torch.no_grad():
             log_policy, _ = self.model(tensor)
@@ -105,7 +107,8 @@ class NetWrapper:
         # Mask illegal moves and pick the best one
         log_policy = log_policy[0].cpu()  # (g, g)
         log_policy = log_policy.masked_fill(mask == 0, float("-inf"))
-        g = 2 * state.n + 1
-        idx = log_policy.argmax().item()
-        return idx // g, idx % g
+        best = torch.argmax(log_policy)
+        row = best // log_policy.shape[1]
+        col = best % log_policy.shape[1]
+        return Move(row=int(row), col=int(col))
 

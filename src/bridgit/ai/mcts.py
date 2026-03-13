@@ -5,10 +5,10 @@ import math
 import numpy as np
 import torch
 
-from bridgit.game import Bridgit
-from bridgit.ai.config import Config
-from bridgit.ai.game_wrapper import GameWrapper
 from bridgit.ai.neural_net import NetWrapper
+from bridgit.game import Bridgit
+from bridgit.schema import Move
+from bridgit.config import BoardConfig, MCTSConfig
 
 
 class MCTSNode:
@@ -18,11 +18,11 @@ class MCTSNode:
                  "value_sum", "prior", "is_expanded"]
 
     def __init__(self, game: Bridgit, parent: "MCTSNode | None" = None,
-                 action: int | None = None, prior: float = 0.0):
+                 action: Move | None = None, prior: float = 0.0):
         self.game = game
         self.parent = parent
         self.action = action
-        self.children: dict[int, MCTSNode] = {}
+        self.children: dict[Move, MCTSNode] = {}
         self.visit_count = 0
         self.value_sum = 0.0
         self.prior = prior
@@ -44,53 +44,60 @@ class MCTSNode:
         """Select child with highest UCB score."""
         return max(self.children.values(), key=lambda c: c.ucb_score(c_puct))
 
+    def best_move(self) -> Move:
+        """Return the most-visited child's move."""
+        return max(self.children, key=lambda m: self.children[m].visit_count)
+
+    def visit_counts(self, grid_size: int) -> np.ndarray:
+        """Return visit counts as a (g, g) array."""
+        visits = np.zeros((grid_size, grid_size), dtype=np.float32)
+        for move, child in self.children.items():
+            visits[move.row, move.col] = child.visit_count
+        return visits
+
 
 class MCTS:
     """Monte Carlo Tree Search guided by a neural network."""
 
-    def __init__(self, net_wrapper: NetWrapper, config: Config):
+    def __init__(self, net_wrapper: NetWrapper, mcts: MCTSConfig, board: BoardConfig):
         self.net_wrapper = net_wrapper
-        self.config = config
-        self.game_wrapper = GameWrapper(config.board_size)
+        self.mcts_config = mcts
+        self.board_config = board
 
     def _predict(self, game: Bridgit) -> tuple[np.ndarray, float]:
         """Run neural net on game state.
 
         Returns:
-            policy: np.ndarray of shape (action_size,) — probabilities
+            policy: np.ndarray of shape (g, g) — probabilities
             value: float — position evaluation for current player
         """
         model = self.net_wrapper.model
         device = self.net_wrapper.device
 
         model.eval()
-        tensor = self.game_wrapper.get_state_tensor(game).unsqueeze(0).to(device)
+        tensor = game.to_tensor().unsqueeze(0).to(device)
 
         with torch.no_grad():
             log_policy, value = model(tensor)
 
-        # log_policy: (1, g, g) → flatten to (g*g,)
-        policy = torch.exp(log_policy[0]).cpu().numpy().flatten()
+        # log_policy: (1, g, g) → (g, g)
+        policy = torch.exp(log_policy[0]).cpu().numpy()
         val = value[0].item()
 
         return policy, val
 
-    def search(self, game: Bridgit) -> np.ndarray:
-        """Run MCTS simulations and return visit counts.
-
-        Returns:
-            visits: np.ndarray of shape (action_size,)
-        """
+    def _search(self, game: Bridgit) -> MCTSNode:
+        """Run MCTS simulations and return the root node."""
         root = MCTSNode(game.copy())
         self._expand(root)
         self._add_dirichlet_noise(root)
 
-        for _ in range(self.config.num_mcts_sims):
+        for _ in range(self.mcts_config.num_simulations):
             node = root
 
             # SELECT
             while node.is_expanded and node.children:
-                node = node.best_child(self.config.c_puct)
+                node = node.best_child(self.mcts_config.c_puct)
 
             # TERMINAL — current_player is the winner (turn doesn't switch on win)
             if node.game.game_over:
@@ -103,12 +110,7 @@ class MCTS:
             # BACKPROPAGATE
             self._backpropagate(node, value)
 
-        # Collect visit counts
-        visits = np.zeros(self.config.action_size, dtype=np.float32)
-        for action, child in root.children.items():
-            visits[action] = child.visit_count
-
-        return visits
+        return root
 
     def _expand(self, node: MCTSNode) -> float:
         """Expand node using neural network. Returns value estimate."""
@@ -117,7 +119,7 @@ class MCTS:
             return 1.0  # current_player is the winner
 
         policy, value = self._predict(node.game)
-        valid_mask = self.game_wrapper.get_valid_moves_mask(node.game)
+        valid_mask = node.game.to_mask().numpy()  # (g, g)
 
         # Mask and renormalize policy
         policy = policy * valid_mask
@@ -132,11 +134,14 @@ class MCTS:
                 node.is_expanded = True
                 return value
 
-        # Create children for valid actions
-        for action in np.nonzero(valid_mask)[0]:
-            child_game = self.game_wrapper.get_next_state(node.game, int(action))
-            child = MCTSNode(child_game, parent=node, action=int(action), prior=policy[action])
-            node.children[int(action)] = child
+        # Create children for valid moves
+        for r, c in zip(*np.nonzero(valid_mask)):
+            r, c = int(r), int(c)
+            move = Move(row=r, col=c)
+            child_game = node.game.copy()
+            child_game.make_move(move)
+            child = MCTSNode(child_game, parent=node, action=move, prior=policy[r, c])
+            node.children[move] = child
 
         node.is_expanded = True
         return value
@@ -159,12 +164,12 @@ class MCTS:
         """Add Dirichlet noise to root priors for exploration."""
         if not node.children:
             return
-        actions = list(node.children.keys())
-        noise = np.random.dirichlet([self.config.dirichlet_alpha] * len(actions))
-        eps = self.config.dirichlet_epsilon
-        for i, action in enumerate(actions):
-            node.children[action].prior = (
-                (1 - eps) * node.children[action].prior + eps * noise[i]
+        moves = list(node.children.keys())
+        noise = np.random.dirichlet([self.mcts_config.dirichlet_alpha] * len(moves))
+        eps = self.mcts_config.dirichlet_epsilon
+        for i, move in enumerate(moves):
+            node.children[move].prior = (
+                (1 - eps) * node.children[move].prior + eps * noise[i]
             )
 
     def get_action_probs(self, game: Bridgit, temperature: float = 1.0) -> np.ndarray:
@@ -175,12 +180,13 @@ class MCTS:
             temperature: 1.0 = proportional to visits, 0.0 = greedy
 
         Returns:
-            probs: np.ndarray of shape (action_size,) summing to 1
+            probs: np.ndarray of shape (g, g) summing to 1
         """
-        visit_counts = self.search(game)
+        root = self._search(game)
+        visit_counts = root.visit_counts(self.board_config.grid_size)
 
         if temperature == 0:
-            best = np.argmax(visit_counts)
+            best = np.unravel_index(np.argmax(visit_counts), visit_counts.shape)
             probs = np.zeros_like(visit_counts)
             probs[best] = 1.0
             return probs

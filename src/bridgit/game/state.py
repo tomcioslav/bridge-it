@@ -1,31 +1,20 @@
 """
-Bridgit Game Implementation
+GameState for Bridgit
 
-Played on a (2n+1)×(2n+1) grid. The board stores three kinds of info:
+Immutable board state for the (2n+1)×(2n+1) grid. The board stores:
   - Bridges on interior crossings where (r+c)%2==0 and 0<r<2n, 0<c<2n
   - Bridge endpoints stamped ±1 step from the bridge in its direction
   - Boundary cells (row 0, row 2n, col 0, col 2n) that serve as goals
 
 Bridge orientation depends on player + column parity:
-  Green (VERTICAL):  even col → vertical,  odd col → horizontal
-  Red (HORIZONTAL):  even col → horizontal, odd col → vertical
-
-When a bridge is placed, its two endpoint cells are marked with the player's
-value. Win check: BFS over a player's endpoint marks (4-connected) from
-one boundary to the opposite boundary.
+  Green (VERTICAL):  even col → horizontal,  odd col → vertical
+  Red (HORIZONTAL):  even col → vertical,    odd col → horizontal
 """
-
-from collections import deque
-from enum import Enum
 
 import numpy as np
 import torch
 
-
-class Player(Enum):
-    """Player representation."""
-    HORIZONTAL = -1  # Red: tries to connect left to right
-    VERTICAL = 1     # Green: tries to connect top to bottom
+from bridgit.schema import Player
 
 
 class GameState:
@@ -105,16 +94,30 @@ class GameState:
             new_board[er, ec] = player.value
         return GameState(new_board, self.n)
 
-    def to_tensor(self, player: Player) -> torch.Tensor:
+    def canonical(self, player: Player) -> "GameState":
+        """Return the board from *player*'s perspective.
+
+        HORIZONTAL is the canonical orientation (left → right).
+        If *player* is already HORIZONTAL the board is returned as-is.
+        If *player* is VERTICAL the board is transposed and values negated,
+        so the current player's pieces become HORIZONTAL value (-1) and
+        top/bottom boundaries become left/right.
+        """
+        if player == Player.HORIZONTAL:
+            return GameState(self.board.copy(), self.n)
+        return GameState(-self.board.T.copy(), self.n)
+
+    def to_tensor(self) -> torch.Tensor:
         """Convert board to float32 tensor of shape (3, 2n+1, 2n+1).
 
+        Assumes the board is already in canonical form (HORIZONTAL perspective).
         Channels:
-          0 — current player's cells (bridges + endpoints)
-          1 — opponent's cells (bridges + endpoints)
-          2 — playability mask (1 at interior crossings that are empty)
+          0 — current player's cells (HORIZONTAL = -1)
+          1 — opponent's cells (VERTICAL = 1)
+          2 — playability mask (1 at empty interior crossings)
         """
-        mine = (self.board == player.value).astype(np.float32)
-        theirs = (self.board == -player.value).astype(np.float32)
+        mine = (self.board == Player.HORIZONTAL.value).astype(np.float32)
+        theirs = (self.board == Player.VERTICAL.value).astype(np.float32)
         g = 2 * self.n + 1
         playable = np.zeros((g, g), dtype=np.float32)
         for r in range(1, g - 1):
@@ -126,6 +129,8 @@ class GameState:
     def to_mask(self) -> torch.Tensor:
         """Return float32 tensor of shape (2n+1, 2n+1):
         1.0 at empty interior crossings, 0.0 elsewhere.
+
+        Assumes the board is already in canonical form.
         """
         g = 2 * self.n + 1
         mask = np.zeros((g, g), dtype=np.float32)
@@ -222,7 +227,6 @@ class GameState:
         )
 
         fig.show()
-        return fig
 
     def __repr__(self) -> str:
         g = 2 * self.n + 1
@@ -266,124 +270,3 @@ class GameState:
                         cells.append(" ")
             rows.append(" ".join(cells))
         return "\n".join(rows)
-
-
-class Bridgit:
-    """Bridgit game — manages turns, win detection, and game flow."""
-
-    def __init__(self, n: int = 5):
-        self.state = GameState.empty(n)
-        self.n = n
-        self.current_player = Player.HORIZONTAL
-        self.winner: Player | None = None
-        self.game_over = False
-        self.move_count = 0          # total moves played
-        self.moves_left_in_turn = 1  # first player gets 1 move, then 2 each
-
-    @property
-    def grid(self) -> np.ndarray:
-        """Direct access to the board array."""
-        return self.state.board
-
-    def get_available_moves(self) -> list[tuple[int, int]]:
-        """Get list of available moves (empty interior crossings)."""
-        g = 2 * self.n + 1
-        return [
-            (r, c)
-            for r in range(1, g - 1) for c in range(1, g - 1)
-            if (r + c) % 2 == 0 and self.state.board[r, c] == 0
-        ]
-
-    def is_valid_move(self, row: int, col: int) -> bool:
-        if self.game_over:
-            return False
-        return self.state.is_crossing(row, col) and self.state.board[row, col] == 0
-
-    def make_move(self, row: int, col: int) -> bool:
-        """Make a move on the board. Returns True if successful."""
-        if not self.is_valid_move(row, col):
-            return False
-        self.state = self.state.make_move(row, col, self.current_player)
-        self.move_count += 1
-        self.moves_left_in_turn -= 1
-        if self._check_winner():
-            self.winner = self.current_player
-            self.game_over = True
-        elif self.moves_left_in_turn == 0:
-            self.current_player = (
-                Player.VERTICAL if self.current_player == Player.HORIZONTAL else Player.HORIZONTAL
-            )
-            self.moves_left_in_turn = 2
-        return True
-
-    def _check_winner(self) -> bool:
-        """Check if the current player has won."""
-        if self.current_player == Player.HORIZONTAL:
-            return self._has_path_endpoints("left", "right")
-        return self._has_path_endpoints("top", "bottom")
-
-    def _has_path_endpoints(self, start_side: str, end_side: str) -> bool:
-        """BFS over the current player's endpoint marks (4-connected).
-
-        Green: top (row=0) to bottom (row=2n)
-        Red: left (col=0) to right (col=2n)
-        """
-        board = self.state.board
-        g = 2 * self.n + 1
-        player_val = self.current_player.value
-
-        # Find start cells: player's endpoints on the start boundary
-        start = set()
-        for r in range(g):
-            for c in range(g):
-                if board[r, c] != player_val:
-                    continue
-                if start_side == "left" and c == 0:
-                    start.add((r, c))
-                elif start_side == "top" and r == 0:
-                    start.add((r, c))
-
-        if not start:
-            return False
-
-        visited = set(start)
-        queue = deque(start)
-
-        while queue:
-            r, c = queue.popleft()
-            if end_side == "right" and c == g - 1:
-                return True
-            if end_side == "bottom" and r == g - 1:
-                return True
-
-            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < g and 0 <= nc < g and (nr, nc) not in visited:
-                    if board[nr, nc] == player_val:
-                        visited.add((nr, nc))
-                        queue.append((nr, nc))
-
-        return False
-
-    def copy(self) -> "Bridgit":
-        """Create a deep copy of the game."""
-        new_game = Bridgit.__new__(Bridgit)
-        new_game.state = GameState(self.state.board.copy(), self.n)
-        new_game.n = self.n
-        new_game.current_player = self.current_player
-        new_game.winner = self.winner
-        new_game.game_over = self.game_over
-        new_game.move_count = self.move_count
-        new_game.moves_left_in_turn = self.moves_left_in_turn
-        return new_game
-
-    def visualize(self):
-        """Visualize the current game state using plotly."""
-        return self.state.visualize()
-
-    def __str__(self) -> str:
-        result = [f"Current Player: {self.current_player.name}", ""]
-        result.append(repr(self.state))
-        if self.game_over:
-            result.extend(["", f"Winner: {self.winner.name}"])
-        return "\n".join(result)
