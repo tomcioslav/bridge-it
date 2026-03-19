@@ -9,9 +9,10 @@ from pathlib import Path
 import torch
 
 from bridgit.ai.neural_net import BridgitNet, NetWrapper
+from bridgit.ai.self_play import batched_self_play
 from bridgit.data.converter import Example, examples_from_records
 from bridgit.players.arena import Arena
-from bridgit.players.players import MCTSPlayer, GreedyMCTSPlayer
+from bridgit.players.players import GreedyMCTSPlayer
 from bridgit.config import Config
 
 
@@ -89,13 +90,11 @@ def train(config: Config, checkpoint_path: str | None = None):
 
         # 1. Self-play
         print("\n[1/3] Self-play...")
-        self_play_player = MCTSPlayer(
-            net_wrapper, config.mcts,
-            temperature=1.0, name="self-play",
-        )
-        arena = Arena(self_play_player, self_play_player, config.board)
-        self_play_records = arena.play_games(
-            config.training.num_self_play_games, verbose=True,
+        self_play_records = batched_self_play(
+            net_wrapper, config.board, config.mcts,
+            num_games=config.training.num_self_play_games,
+            batch_size=config.training.self_play_batch_size,
+            temperature=1.0, verbose=True,
         )
 
         # Save self-play games

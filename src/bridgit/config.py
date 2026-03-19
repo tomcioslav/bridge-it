@@ -52,6 +52,7 @@ class TrainingConfig(BaseModel):
     learning_rate: float = 0.001
     weight_decay: float = 1e-4
     replay_buffer_size: int = 5  # number of iterations to keep
+    self_play_batch_size: int = 8  # concurrent games in batched self-play
 
 
 class ArenaConfig(BaseModel):
