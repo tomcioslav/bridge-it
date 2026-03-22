@@ -2,7 +2,7 @@
 """
 GUI interface for playing Bridgit using pygame.
 
-Supports human vs human mode on the (2n+1)×(2n+1) board.
+Supports human vs human mode on the (2n+1)x(2n+1) board.
 Usage:
     python play.py [board_size]
 """
@@ -11,8 +11,9 @@ import argparse
 
 import pygame
 
-from bridgit import Bridgit, Player
-from bridgit.game import GameState
+from bridgit.games.bridgit.config import BoardConfig
+from bridgit.games.bridgit.game import BridgitGame, BridgitGameState
+from bridgit.games.bridgit.player import Player
 
 # Colors
 BACKGROUND = (245, 245, 250)
@@ -44,9 +45,10 @@ class BridgitGUI:
     def __init__(self, n: int = 5):
         pygame.init()
 
-        self.game = Bridgit(n)
         self.n = n
-        self.g = 2 * n + 1  # grid dimension
+        self.config = BoardConfig(size=n)
+        self.game = BridgitGame(self.config)
+        self.g = self.config.grid_size  # grid dimension
 
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
         pygame.display.set_caption("Bridgit")
@@ -70,6 +72,32 @@ class BridgitGUI:
 
         self.hover_cell: tuple[int, int] | None = None
 
+    @property
+    def _board(self):
+        """Direct access to the board array."""
+        return self.game._board
+
+    @property
+    def _current_player(self) -> Player:
+        """Current player as Player enum."""
+        return self.game._current_player
+
+    def _is_valid_move(self, row: int, col: int) -> bool:
+        """Check if (row, col) is a valid move."""
+        if self.game.is_over:
+            return False
+        return self.game._is_crossing(row, col) and self.game._board[row, col] == 0
+
+    def _make_move(self, row: int, col: int) -> None:
+        """Make a move at (row, col) by converting to action index."""
+        player = self.game._current_player
+        if player == Player.VERTICAL:
+            # BridgitGame expects canonical space; for VERTICAL, transpose coords
+            action = self.game.row_col_to_action(col, row)
+        else:
+            action = self.game.row_col_to_action(row, col)
+        self.game.make_action(action)
+
     def cell_center(self, row: int, col: int) -> tuple[int, int]:
         """Get pixel center of a grid cell."""
         x = self.board_offset_x + col * self.cell_size + self.cell_size / 2
@@ -87,7 +115,7 @@ class BridgitGUI:
 
     def draw_bridge(self, row: int, col: int, player: Player, color: tuple, thickness: int = LINE_THICKNESS):
         """Draw a bridge line from endpoint to endpoint."""
-        eps = GameState.endpoints(row, col, player)
+        eps = BridgitGame._endpoints(row, col, player)
         (r0, c0), (r1, c1) = eps
         start = self.cell_center(r0, c0)
         end = self.cell_center(r1, c1)
@@ -95,7 +123,7 @@ class BridgitGUI:
 
     def draw_bridge_transparent(self, row: int, col: int, player: Player, color: tuple, thickness: int = LINE_THICKNESS):
         """Draw a semi-transparent bridge preview."""
-        eps = GameState.endpoints(row, col, player)
+        eps = BridgitGame._endpoints(row, col, player)
         (r0, c0), (r1, c1) = eps
         start = self.cell_center(r0, c0)
         end = self.cell_center(r1, c1)
@@ -116,7 +144,7 @@ class BridgitGUI:
 
     def draw_board(self):
         """Draw the game board."""
-        board = self.game.grid
+        board = self._board
         g = self.g
 
         # 1. Draw boundary dots
@@ -136,7 +164,7 @@ class BridgitGUI:
                 if (r + c) % 2 != 0 or board[r, c] != 0:
                     continue
                 for player, color in [(Player.VERTICAL, GREEN_COLOR), (Player.HORIZONTAL, RED_COLOR)]:
-                    eps = GameState.endpoints(r, c, player)
+                    eps = BridgitGame._endpoints(r, c, player)
                     (r0, c0), (r1, c1) = eps
                     start = self.cell_center(r0, c0)
                     end = self.cell_center(r1, c1)
@@ -161,14 +189,14 @@ class BridgitGUI:
                 color = GREEN_COLOR if val == 1 else RED_COLOR
                 self.draw_bridge(r, c, player, color)
                 # Draw endpoint dots
-                for er, ec in GameState.endpoints(r, c, player):
+                for er, ec in BridgitGame._endpoints(r, c, player):
                     pygame.draw.circle(self.screen, color, self.cell_center(er, ec), DOT_RADIUS)
 
         # 4. Draw hover preview
-        if self.hover_cell and not self.game.game_over:
+        if self.hover_cell and not self.game.is_over:
             row, col = self.hover_cell
-            if self.game.is_valid_move(row, col):
-                player = self.game.current_player
+            if self._is_valid_move(row, col):
+                player = self._current_player
                 base = GREEN_COLOR if player == Player.VERTICAL else RED_COLOR
                 color = base + (HOVER_ALPHA,)
                 self.draw_bridge_transparent(row, col, player, color)
@@ -189,12 +217,12 @@ class BridgitGUI:
         y += 80
 
         # Current player
-        if not self.game.game_over:
+        if not self.game.is_over:
             text = self.small_font.render("Current Turn:", True, TEXT_COLOR)
             self.screen.blit(text, text.get_rect(centerx=panel_x + PANEL_WIDTH // 2, top=y))
             y += 35
 
-            if self.game.current_player == Player.HORIZONTAL:
+            if self._current_player == Player.HORIZONTAL:
                 name, color = "RED (Horizontal)", RED_COLOR
             else:
                 name, color = "GREEN (Vertical)", GREEN_COLOR
@@ -239,7 +267,8 @@ class BridgitGUI:
         overlay.fill((0, 0, 0))
         self.screen.blit(overlay, (0, 0))
 
-        if self.game.winner == Player.VERTICAL:
+        winner = self.game._winner
+        if winner == Player.VERTICAL:
             winner_text, color = "GREEN WINS!", GREEN_COLOR
             subtitle = "Top-Bottom Connection Complete"
         else:
@@ -257,11 +286,11 @@ class BridgitGUI:
 
     def handle_click(self, pos: tuple[int, int]):
         """Handle mouse click."""
-        if self.game.game_over:
+        if self.game.is_over:
             return
         cell = self.get_cell_from_mouse(pos)
-        if cell:
-            self.game.make_move(*cell)
+        if cell and self._is_valid_move(*cell):
+            self._make_move(*cell)
 
     def run(self):
         """Main game loop."""
@@ -275,7 +304,7 @@ class BridgitGUI:
                     if event.key == pygame.K_q:
                         self.running = False
                     elif event.key == pygame.K_r:
-                        self.game = Bridgit(self.n)
+                        self.game = BridgitGame(self.config)
 
             # Update hover
             self.hover_cell = self.get_cell_from_mouse(pygame.mouse.get_pos())
@@ -284,7 +313,7 @@ class BridgitGUI:
             self.screen.fill(BACKGROUND)
             self.draw_board()
             self.draw_panel()
-            if self.game.game_over:
+            if self.game.is_over:
                 self.draw_win_screen()
 
             pygame.display.flip()

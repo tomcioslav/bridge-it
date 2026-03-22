@@ -2,27 +2,26 @@
 
 from __future__ import annotations
 
-import numpy as np
-import torch
-import plotly.graph_objects as go
-
-from bridgit.config import BoardConfig
-from bridgit.game.state import GameState
-from bridgit.schema.move import Move
-from bridgit.schema.player import Player
-
 from typing import TYPE_CHECKING
 
+import numpy as np
+import plotly.graph_objects as go
+import torch
+
+from bridgit.games.bridgit.config import BoardConfig
+from bridgit.games.bridgit.game import BridgitGame, BridgitGameState
+from bridgit.games.bridgit.player import Player
+
 if TYPE_CHECKING:
-    from bridgit.ai.mcts import MCTSNode
-    from bridgit.schema.game_record import GameRecord
+    from bridgit.core.game_record import GameRecord
+    from bridgit.core.mcts import MCTSNode
 
 
 class Visualizer:
     """Plotly-based visualizations for Bridgit."""
 
     @staticmethod
-    def visualize_game_state(state: GameState) -> go.Figure:
+    def visualize_game_state(state: BridgitGameState) -> go.Figure:
         """Visualize a single board state."""
         g = 2 * state.n + 1
         fig = go.Figure()
@@ -54,7 +53,7 @@ class Visualizer:
                 if (r + c) % 2 != 0 or state.board[r, c] != 0:
                     continue
                 for player, color in [(Player.VERTICAL, "green"), (Player.HORIZONTAL, "red")]:
-                    eps = state.endpoints(r, c, player)
+                    eps = BridgitGame._endpoints(r, c, player)
                     (r0, c0), (r1, c1) = eps
                     fig.add_shape(type="line",
                         x0=c0, x1=c1, y0=r0, y1=r1,
@@ -71,7 +70,7 @@ class Visualizer:
                     continue
                 player = Player.VERTICAL if val == 1 else Player.HORIZONTAL
                 color = "green" if val == 1 else "red"
-                eps = state.endpoints(r, c, player)
+                eps = BridgitGame._endpoints(r, c, player)
                 (r0, c0), (r1, c1) = eps
                 fig.add_shape(type="line",
                     x0=c0, x1=c1, y0=r0, y1=r1,
@@ -129,19 +128,27 @@ class Visualizer:
     @staticmethod
     def visualize_game(record: GameRecord) -> go.Figure:
         """Interactive plotly visualization of a full game with a move slider."""
-        from bridgit.game import Bridgit
+        config = BoardConfig(**record.game_config)
+        g = config.grid_size
 
-        board_config = BoardConfig(size=record.board_size)
-        g = record.grid_size
-
-        # Replay game to collect states at each step
-        game = Bridgit(board_config)
-        states: list[GameState] = [game.state]
+        # Replay game to collect board states at each step
+        game = BridgitGame(config)
+        states: list[BridgitGameState] = [game.get_state()]
         for rec in record.moves:
-            game.make_move(rec.move)
-            states.append(game.state)
+            game.make_action(rec.action)
+            states.append(game.get_state())
 
-        def _make_frame_traces(state: GameState, step: int) -> list[go.Scatter]:
+        # Map player int ids to names
+        player_names = record.player_names
+
+        def _action_to_board_coords(action: int, player_id: int) -> tuple[int, int]:
+            """Convert canonical action back to board (row, col)."""
+            row, col = divmod(action, g)
+            if player_id == BridgitGame._ID_FROM_PLAYER[Player.VERTICAL]:
+                row, col = col, row
+            return row, col
+
+        def _make_frame_traces(state: BridgitGameState, step: int) -> list[go.Scatter]:
             traces = []
 
             # Boundary endpoint dots
@@ -175,10 +182,17 @@ class Visualizer:
                         continue
                     player = Player.VERTICAL if val == 1 else Player.HORIZONTAL
                     color = "green" if val == 1 else "red"
-                    eps = state.endpoints(r, c, player)
+                    eps = BridgitGame._endpoints(r, c, player)
                     (r0, c0), (r1, c1) = eps
 
-                    width = 7 if step > 0 and record.moves[step - 1].move == Move(row=r, col=c) else 4
+                    # Highlight the most recent move
+                    is_latest = False
+                    if step > 0:
+                        move_rec = record.moves[step - 1]
+                        mr, mc = _action_to_board_coords(move_rec.action, move_rec.player)
+                        is_latest = (r == mr and c == mc)
+
+                    width = 7 if is_latest else 4
                     traces.append(go.Scatter(
                         x=[c0, c1], y=[r0, r1], mode="lines+markers",
                         line=dict(color=color, width=width),
@@ -196,7 +210,9 @@ class Visualizer:
                 title = "Start"
             else:
                 rec = record.moves[i - 1]
-                title = f"Move {i}: {rec.player.name} ({rec.move.row},{rec.move.col})"
+                mr, mc = _action_to_board_coords(rec.action, rec.player)
+                pname = player_names[rec.player]
+                title = f"Move {i}: {pname} ({mr},{mc})"
             raw_frames.append((frame_traces, title))
 
         max_traces = max(len(traces) for traces, _ in raw_frames)
@@ -249,12 +265,11 @@ class Visualizer:
             ],
         )]
 
-        h_name = record.horizontal_player
-        v_name = record.vertical_player
-        winner_name = h_name if record.winner == Player.HORIZONTAL else v_name
+        winner_name = record.winner_name() or "draw"
+        names_str = " vs ".join(player_names)
         fig.update_layout(
             width=150 + g * 50, height=200 + g * 50,
-            title=f"{h_name} (H) vs {v_name} (V) — Winner: {winner_name} in {record.num_moves} moves",
+            title=f"{names_str} — Winner: {winner_name} in {record.num_moves} moves",
             xaxis=dict(
                 range=[-0.5, g - 0.5], scaleanchor="y",
                 tickmode="array",
@@ -277,31 +292,24 @@ class Visualizer:
 
     @staticmethod
     def save_game_html(record: GameRecord, path: str) -> None:
-        """Save an interactive game visualization as a standalone HTML file.
-
-        The resulting file includes all JS/CSS inline and can be opened
-        in any browser without an internet connection.
-        """
+        """Save an interactive game visualization as a standalone HTML file."""
         fig = Visualizer.visualize_game(record)
         fig.write_html(path, include_plotlyjs=True, full_html=True,
                        auto_play=False)
 
     @staticmethod
     def visualize_node(node: MCTSNode) -> go.Figure:
-        """Visualize an MCTS node: board state with children info overlaid.
-
-        Shows the current board state and, for each child, displays
-        its child_index, move, visit count, Q-value, and prior on the
-        board cell where the move would be placed.
-        """
-        state = node.game.state
+        """Visualize an MCTS node: board state with children info overlaid."""
+        game: BridgitGame = node.game
+        state = game.get_state()
         fig = Visualizer.visualize_game_state(state)
 
         # Node info in title
         path_str = str(node.path) if node.path else "(root)"
         q_str = f"{node.q_value:+.3f}" if node.visit_count > 0 else "N/A"
+        player_name = game._current_player.name
         title = (
-            f"Node {path_str} | player={node.game.current_player.name} | "
+            f"Node {path_str} | player={player_name} | "
             f"visits={node.visit_count} | Q={q_str}"
         )
 
@@ -309,12 +317,15 @@ class Visualizer:
             fig.update_layout(title=title)
             return fig
 
+        g = game._g
+
         # Overlay children info on the board
         annotations = []
-        for move, child in node.children.items():
-            # The action is in canonical space; decanonicalize for board position
-            actual_move = move.decanonicalize(node.game.current_player)
-            r, c = actual_move.row, actual_move.col
+        for action, child in node.children.items():
+            # Convert canonical action to board coords
+            row, col = divmod(action, g)
+            if game._current_player == Player.VERTICAL:
+                row, col = col, row
 
             child_q = f"{child.q_value:+.3f}" if child.visit_count > 0 else "?"
             label = (
@@ -324,7 +335,7 @@ class Visualizer:
                 f"P={child.prior:.2f}"
             )
             annotations.append(dict(
-                x=c, y=r,
+                x=col, y=row,
                 text=label,
                 showarrow=False,
                 font=dict(size=9, color="black"),
