@@ -1,158 +1,109 @@
-# Bridgit Game
+# pymcts
 
-A Python implementation of the Bridgit connection game with support for player vs player gameplay and future AI training capabilities.
+A generic AlphaZero-style training engine for two-player zero-sum games. Implement a `Game` class and a `NeuralNet` class — MCTS, self-play, training, and arena evaluation work automatically.
 
-## About Bridgit
-
-Bridgit is a two-player connection game played on an n×n grid. Players take turns placing their lines in empty grid cells:
-
-- **Player 1 (Horizontal - Green)**: Places horizontal lines and tries to connect the left edge to the right edge
-- **Player 2 (Vertical - Red)**: Places vertical lines and tries to connect the top edge to the bottom edge
-
-Players must create a continuous path through adjacent cells (up, down, left, right) to win. The first player to complete their connection wins!
+Ships with **Bridgit** as the first game implementation.
 
 ## Installation
 
-This project uses [uv](https://github.com/astral-sh/uv) for fast Python package management.
-
-### Prerequisites
-
-- Python 3.10+
-- uv (install with: `curl -LsSf https://astral.sh/uv/install.sh | sh`)
-
-### Setup
-
 ```bash
 # Clone the repository
-git clone <your-repo-url>
-cd bridge-it
+git clone git@github.com:tomcioslav/pymcts.git
+cd pymcts
 
-# Create virtual environment
-uv venv
-
-# Activate virtual environment
-source .venv/bin/activate  # On Unix/macOS
-# or
-.venv\Scripts\activate     # On Windows
-
-# Install dependencies
-uv pip install numpy pygame
-
-# Or install the package with all dependencies
+# Create virtual environment and install
+uv venv && source .venv/bin/activate
 uv pip install -e ".[all]"
 ```
 
-## Usage
+Requires Python 3.10+ and [uv](https://github.com/astral-sh/uv).
 
-Play with default board size (5×5):
-```bash
-python play.py
+## Quick Start
+
+### Train on Bridgit
+
+```python
+from pymcts.games.bridgit.game import BridgitGame
+from pymcts.games.bridgit.config import BoardConfig, NeuralNetConfig
+from pymcts.games.bridgit.neural_net import BridgitNet
+from pymcts.core.config import MCTSConfig, TrainingConfig, ArenaConfig
+from pymcts.core.trainer import train
+
+board_config = BoardConfig(size=5)
+net = BridgitNet(board_config=board_config, net_config=NeuralNetConfig())
+
+train(
+    game_factory=lambda: BridgitGame(board_config),
+    net=net,
+    mcts_config=MCTSConfig(num_simulations=50),
+    training_config=TrainingConfig(num_iterations=3, num_self_play_games=10),
+    arena_config=ArenaConfig(num_games=10),
+    game_type="bridgit",
+    game_config=board_config.model_dump(),
+)
 ```
 
-Play with custom board size:
-```bash
-python play.py <n>
-
-# Example: 7×7 board
-python play.py 7
-```
-
-### How to Play
-
-The game features a beautiful graphical interface with:
-- **Square grid**: An n×n grid where each cell can hold one line
-- **Click on cells** to place your line (green horizontal or red vertical)
-- **Hover highlight** shows which cell you're about to select
-- **Visual player indicators** show whose turn it is
-- **Win screen** celebrates when someone completes their connection from side to side
-
-### Controls
-
-- **Mouse**: Click on grid cells to place your line
-- **R key**: Restart the game
-- **Q key**: Quit
-
-## Project Structure
-
-```
-bridge-it/
-├── bridgit/           # Core game package
-│   ├── __init__.py    # Package initialization
-│   └── game.py        # Game logic and board representation
-├── ai/                # AI components (future)
-├── tests/             # Unit tests (future)
-├── play.py            # GUI interface for player vs player
-├── README.md          # This file
-├── LICENSE            # MIT License
-└── pyproject.toml     # Project configuration
-```
-
-## Game Rules
-
-### Board
-
-- The board is an n×n grid (default: 5×5)
-- Each grid cell can contain one line (horizontal or vertical)
-- Grid representation:
-  - 0: empty cell
-  - -1: Player 1's horizontal line (green)
-  - 1: Player 2's vertical line (red)
-
-### Gameplay
-
-1. **Player 1 (HORIZONTAL - Green)** goes first
-   - Places horizontal lines in empty cells
-   - Wins by creating a connected path from the left edge to the right edge
-
-2. **Player 2 (VERTICAL - Red)** goes second
-   - Places vertical lines in empty cells
-   - Wins by creating a connected path from the top edge to the bottom edge
-
-3. **Adjacency**: Cells are connected if they share an edge (up, down, left, right)
-4. **Turns**: Players alternate placing one line per turn
-5. **Winning**: First player to create an unbroken path across the board wins
-
-### Strategy Tips
-
-- Block your opponent by cutting off their potential paths
-- Create multiple paths to increase your chances of connecting
-- Control the center for maximum flexibility
-- Think ahead - ensure your path can actually reach the opposite side
-- Adjacent cells (orthogonal connections only) form your path
-
-## Development
-
-### Running Tests
+### Play Bridgit (GUI)
 
 ```bash
-pytest tests/
+python play.py        # default 5x5
+python play.py 7      # custom size
 ```
 
-### Code Style
+## Architecture
 
-This project follows standard Python conventions:
-- PEP 8 style guide
-- Type hints where applicable
-- Docstrings for all public functions
+```
+src/pymcts/
+├── core/                        # Generic engine (game-agnostic)
+│   ├── base_game.py             # BaseGame, Board2DGame, GameState ABCs
+│   ├── base_neural_net.py       # BaseNeuralNet(ABC, nn.Module)
+│   ├── mcts.py                  # MCTS with integer actions
+│   ├── self_play.py             # Batched self-play
+│   ├── trainer.py               # AlphaZero training loop
+│   ├── arena.py                 # Model comparison
+│   ├── players.py               # RandomPlayer, MCTSPlayer
+│   ├── game_record.py           # Game recording and evaluation
+│   ├── data.py                  # Training data extraction
+│   └── config.py                # MCTSConfig, TrainingConfig, ArenaConfig
+└── games/
+    └── bridgit/                 # Bridgit implementation
+        ├── game.py              # BridgitGame(Board2DGame)
+        ├── neural_net.py        # BridgitNet(BaseNeuralNet) — ResNet
+        ├── config.py            # BoardConfig, NeuralNetConfig
+        ├── player.py            # Player enum
+        ├── union_find.py        # Win detection
+        └── visualizer.py        # Plotly visualization
+```
 
-## Future Features
+## Adding a New Game
 
-- [ ] GUI interface with pygame
-- [ ] AI opponent (random, minimax, MCTS)
-- [ ] Neural network training with PyTorch
-- [ ] Reinforcement learning agents
-- [ ] Game state serialization
-- [ ] Move history and replay
-- [ ] Multiple board size presets
+Implement three things:
 
-## Contributing
+1. **`MyGameState(GameState)`** — your game's state representation
+2. **`MyGame(BaseGame)` or `MyGame(Board2DGame)`** — game logic, actions as integers, canonical state via `get_state()`
+3. **`MyNet(BaseNeuralNet)`** — implement `encode(state) -> tensor` and `forward(tensor) -> (policy, value)`
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+The engine handles everything else: MCTS tree search, batched self-play, training loop, arena evaluation.
+
+Key design principles:
+- **Actions are integers** (0 to `action_space_size - 1`). The game maps to/from internal representation.
+- **Game state is opaque** to the engine. The neural net's `encode()` converts it to tensors.
+- **Canonicalization is the game's responsibility**. `get_state()` and `to_mask()` always return from the current player's perspective.
+
+## Notebooks
+
+- `notebooks/training.ipynb` — full training pipeline
+- `notebooks/arena.ipynb` — model comparison and batched self-play benchmarks
+- `notebooks/mcts.ipynb` — MCTS visualization and tree inspection
+- `notebooks/analysis.ipynb` — training run analysis
+- `notebooks/game.ipynb` — game mechanics exploration
+
+## Running Tests
+
+```bash
+pytest test/ -v
+```
 
 ## License
 
 MIT License - see LICENSE file for details
-
-## Acknowledgments
-
-Bridgit was invented by David Gale in the 1960s and is part of the family of connection games.
