@@ -31,8 +31,13 @@ ai = [
 gui = [
     "pygame>=2.5.0",
 ]
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.24.0",
+]
 all = [
-    "pymcts[dev,ai,gui]",
+    "pymcts[dev,ai,gui,docs]",
 ]
 
 [build-system]

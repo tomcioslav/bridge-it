@@ -54,6 +54,9 @@ data/
 # Worktrees
 .worktrees/
 
+# MkDocs
+site/
+
 # Misc
 *.log
 .env
