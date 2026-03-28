@@ -1,7 +1,7 @@
 """Smoke test: run a tiny training iteration with the generic engine + Bridgit."""
 
 from pymcts.core.self_play import batched_self_play
-from pymcts.core.arena import Arena
+from pymcts.core.arena import batched_arena
 from pymcts.core.players import RandomPlayer, GreedyMCTSPlayer
 from pymcts.core.data import examples_from_records
 from pymcts.core.config import MCTSConfig
@@ -42,11 +42,13 @@ class TestFullPipeline:
         # 3. Arena
         new_player = GreedyMCTSPlayer(net, mcts_config, name="new")
         random_player = RandomPlayer(name="random")
-        arena = Arena(
-            new_player, random_player,
+        eval_records = batched_arena(
+            player_a=new_player,
+            player_b=random_player,
             game_factory=game_factory,
+            num_games=2,
+            swap_players=True,
             game_type="bridgit",
-            game_config=board_config.model_dump(),
+            verbose=False,
         )
-        eval_records = arena.play_games(2, verbose=False)
         assert len(eval_records) == 2

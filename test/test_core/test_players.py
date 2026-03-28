@@ -1,6 +1,6 @@
 from test.test_core.test_mcts import TicTacToe, DummyNet
 from pymcts.core.players import BasePlayer, RandomPlayer, MCTSPlayer
-from pymcts.core.arena import Arena
+from pymcts.core.arena import batched_arena
 from pymcts.core.config import MCTSConfig
 
 
@@ -37,17 +37,52 @@ class TestMCTSPlayer:
         assert player.last_policy.shape == (9,)
 
 
-class TestArena:
-    def test_play_game_completes(self):
+class TestBatchedArenaWithPlayers:
+    def test_random_vs_random(self):
+        """batched_arena should work with two RandomPlayers."""
         p1 = RandomPlayer(name="p1")
         p2 = RandomPlayer(name="p2")
-        arena = Arena(p1, p2, game_factory=TicTacToe)
-        record = arena.play_game()
-        assert record.num_moves > 0
+        result = batched_arena(
+            player_a=p1,
+            player_b=p2,
+            game_factory=TicTacToe,
+            num_games=10,
+            swap_players=True,
+            verbose=False,
+        )
+        assert len(result) == 10
+        scores = result.scores
+        assert scores.get("p1", 0) + scores.get("p2", 0) <= 10
 
-    def test_play_games_returns_collection(self):
-        p1 = RandomPlayer(name="p1")
-        p2 = RandomPlayer(name="p2")
-        arena = Arena(p1, p2, game_factory=TicTacToe)
-        collection = arena.play_games(4)
-        assert len(collection) == 4
+    def test_mcts_vs_random(self):
+        """batched_arena should work with MCTSPlayer vs RandomPlayer."""
+        net = DummyNet()
+        config = MCTSConfig(num_simulations=5)
+        p1 = MCTSPlayer(net, config, name="mcts")
+        p2 = RandomPlayer(name="random")
+        result = batched_arena(
+            player_a=p1,
+            player_b=p2,
+            game_factory=TicTacToe,
+            num_games=4,
+            swap_players=True,
+            verbose=False,
+        )
+        assert len(result) == 4
+
+    def test_mcts_vs_mcts(self):
+        """batched_arena should work with two MCTSPlayers using batched inference."""
+        net_a = DummyNet()
+        net_b = DummyNet()
+        config = MCTSConfig(num_simulations=5)
+        p1 = MCTSPlayer(net_a, config, name="a")
+        p2 = MCTSPlayer(net_b, config, name="b")
+        result = batched_arena(
+            player_a=p1,
+            player_b=p2,
+            game_factory=TicTacToe,
+            num_games=4,
+            swap_players=True,
+            verbose=False,
+        )
+        assert len(result) == 4
