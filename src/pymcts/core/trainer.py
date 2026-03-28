@@ -12,7 +12,9 @@ from pymcts.core.base_game import BaseGame
 from pymcts.core.base_neural_net import BaseNeuralNet
 from pymcts.core.config import ArenaConfig, MCTSConfig, PathsConfig, TrainingConfig
 from pymcts.core.data import Example, examples_from_records
-from pymcts.core.players import GreedyMCTSPlayer
+from pymcts.core.players import GreedyMCTSPlayer, RandomPlayer
+from pymcts.elo.config import EloRating, MatchResult, TournamentResult
+from pymcts.elo.rating import compute_elo_ratings
 from pymcts.core.self_play import batched_self_play
 
 logger = logging.getLogger("bridgit.core.trainer")
@@ -86,6 +88,12 @@ def train(
 
     # Best accepted model checkpoints (most recent last), up to 10
     best_checkpoints: deque[tuple[int, str]] = deque(maxlen=10)
+
+    # Elo tracking state
+    elo_match_results: list[MatchResult] = []
+    elo_reference_pool: list[tuple[str, GreedyMCTSPlayer | RandomPlayer]] = []
+    if training_config.elo_tracking:
+        elo_reference_pool.append(("random", RandomPlayer(name="random")))
 
     # game_factory wrapper for examples_from_records (takes config dict)
     def _game_from_config(cfg: dict) -> BaseGame:
@@ -238,6 +246,68 @@ def train(
         }
         iter_data_path = iter_dir / "iteration_data.json"
         iter_data_path.write_text(json.dumps(iteration_data, indent=2))
+
+        # Elo tracking
+        if training_config.elo_tracking:
+            if verbose:
+                print("  Elo evaluation...")
+
+            current_player = GreedyMCTSPlayer(net, mcts_config, name=f"iter_{iteration:03d}")
+
+            for ref_name, ref_player in elo_reference_pool:
+                ref_records = batched_arena(
+                    player_a=current_player,
+                    player_b=ref_player,
+                    game_factory=game_factory,
+                    num_games=training_config.elo_games_per_matchup,
+                    batch_size=training_config.elo_games_per_matchup,
+                    swap_players=True,
+                    game_type="elo",
+                    verbose=verbose,
+                )
+                scores = ref_records.scores
+                wins_a = scores.get(current_player.name, 0)
+                wins_b = scores.get(ref_name, 0)
+                draws = len(ref_records) - wins_a - wins_b
+
+                elo_match_results.append(MatchResult(
+                    player_a=current_player.name,
+                    player_b=ref_name,
+                    wins_a=wins_a,
+                    wins_b=wins_b,
+                    draws=draws,
+                ))
+
+            elo_ratings = compute_elo_ratings(elo_match_results, anchor_player="random")
+            current_elo = next(
+                (r.rating for r in elo_ratings if r.name == current_player.name),
+                1000.0,
+            )
+
+            if verbose:
+                print(f"  Elo: {current_elo:.0f}")
+
+            # Add to reference pool at interval
+            if iteration % training_config.elo_reference_interval == 0:
+                ref_net = net.copy()
+                ref_player_new = GreedyMCTSPlayer(ref_net, mcts_config, name=f"ref_iter_{iteration:03d}")
+                elo_reference_pool.append((ref_player_new.name, ref_player_new))
+
+            # Save Elo results
+            elo_result = TournamentResult(
+                ratings=elo_ratings,
+                match_results=elo_match_results,
+                anchor_player="random",
+                anchor_rating=1000.0,
+                timestamp=datetime.now().isoformat(),
+                metadata={"training_run": str(run_dir), "iteration": iteration},
+            )
+            elo_path = run_dir / "elo_results.json"
+            elo_path.write_text(elo_result.model_dump_json(indent=2))
+
+            # Add elo to iteration data
+            iteration_data["elo"] = current_elo
+            iter_data_path.write_text(json.dumps(iteration_data, indent=2))
 
         if verbose:
             print()

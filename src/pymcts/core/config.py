@@ -6,7 +6,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 
-_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
 
 class PathsConfig(BaseModel):
@@ -37,6 +37,9 @@ class TrainingConfig(BaseModel):
     weight_decay: float = 1e-4
     replay_buffer_size: int = 5
     self_play_batch_size: int = 8
+    elo_tracking: bool = False
+    elo_reference_interval: int = 5
+    elo_games_per_matchup: int = 40
 
 
 class ArenaConfig(BaseModel):
