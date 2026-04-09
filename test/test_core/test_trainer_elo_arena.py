@@ -186,3 +186,86 @@ class TestEloArenaTraining:
 
         assert (arena_dir / "random" / "player.json").exists()
         assert (arena_dir / "seed_player" / "player.json").exists()
+
+
+class TestEloArenaPoolEviction:
+    def test_pool_respects_max_size(self, tmp_path):
+        """Pool should not exceed max_pool_size."""
+        paths = PathsConfig(
+            root=tmp_path,
+            trainings=tmp_path / "trainings",
+            checkpoints=tmp_path / "checkpoints",
+            models=tmp_path / "models",
+            data=tmp_path / "data",
+        )
+        net = DummyNet()
+        training_config = TrainingConfig(
+            num_iterations=6,
+            num_self_play_games=4,
+            num_epochs=1,
+            batch_size=4,
+            self_play_batch_size=2,
+            replay_buffer_size=2,
+        )
+        elo_arena = EloArenaConfig(
+            games_per_matchup=4,
+            elo_threshold=0.0,
+            pool_growth_interval=1,  # Add every iteration
+            max_pool_size=3,  # random + 2 others max
+        )
+
+        train(
+            game_factory=TicTacToe,
+            net=net,
+            mcts_config=MCTSConfig(num_simulations=5),
+            training_config=training_config,
+            arena=elo_arena,
+            paths_config=paths,
+            verbose=False,
+        )
+
+        run_dirs = list((tmp_path / "trainings").glob("run_*"))
+        run_dir = run_dirs[0]
+        arena_dir = run_dir / "arena"
+
+        # Random player should always survive eviction
+        assert (arena_dir / "random" / "player.json").exists()
+
+    def test_random_player_never_evicted(self, tmp_path):
+        """RandomPlayer should never be evicted from the pool."""
+        paths = PathsConfig(
+            root=tmp_path,
+            trainings=tmp_path / "trainings",
+            checkpoints=tmp_path / "checkpoints",
+            models=tmp_path / "models",
+            data=tmp_path / "data",
+        )
+        net = DummyNet()
+        training_config = TrainingConfig(
+            num_iterations=4,
+            num_self_play_games=4,
+            num_epochs=1,
+            batch_size=4,
+            self_play_batch_size=2,
+            replay_buffer_size=2,
+        )
+        elo_arena = EloArenaConfig(
+            games_per_matchup=4,
+            elo_threshold=0.0,
+            pool_growth_interval=1,
+            max_pool_size=2,  # Very tight — random + 1
+        )
+
+        train(
+            game_factory=TicTacToe,
+            net=net,
+            mcts_config=MCTSConfig(num_simulations=5),
+            training_config=training_config,
+            arena=elo_arena,
+            paths_config=paths,
+            verbose=False,
+        )
+
+        run_dirs = list((tmp_path / "trainings").glob("run_*"))
+        run_dir = run_dirs[0]
+        assert (run_dir / "arena" / "random" / "player.json").exists()
