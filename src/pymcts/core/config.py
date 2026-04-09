@@ -47,3 +47,13 @@ class ArenaConfig(BaseModel):
     num_games: int = 40
     threshold: float = 0.55
     swap_players: bool = True
+
+
+class EloArenaConfig(BaseModel):
+    """Elo pool-based arena evaluation settings."""
+    games_per_matchup: int = 40
+    elo_threshold: float = 20.0
+    pool_growth_interval: int = 5
+    max_pool_size: int | None = None
+    swap_players: bool = True
+    initial_pool: list[str] | None = None
