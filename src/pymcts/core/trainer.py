@@ -103,7 +103,7 @@ def train(
 
     # Elo pool state (only used with EloArenaConfig)
     pool_players: list[tuple[str, BasePlayer, float]] = []  # (name, player, frozen_elo)
-    current_elo: float | None = None
+    pool_current_elo: float | None = None
 
     if isinstance(arena, EloArenaConfig):
         # Save and add RandomPlayer to pool
@@ -405,7 +405,7 @@ def train(
             post_elo = compute_elo_against_pool("candidate", pool_ratings, match_results)
 
             # First iteration: establish baseline elo
-            if current_elo is None:
+            if pool_current_elo is None:
                 pre_net = net.copy()
                 pre_net.load_checkpoint(pre_checkpoint)
                 pre_player = GreedyMCTSPlayer(pre_net, mcts_config, name="pre_candidate")
@@ -432,18 +432,18 @@ def train(
                         wins_b=wins_b,
                         draws=draws,
                     ))
-                current_elo = compute_elo_against_pool("pre_candidate", pool_ratings, pre_match_results)
+                pool_current_elo = compute_elo_against_pool("pre_candidate", pool_ratings, pre_match_results)
 
-            accepted = post_elo >= current_elo + arena.elo_threshold
+            accepted = post_elo >= pool_current_elo + arena.elo_threshold
 
             if verbose:
-                print(f"  Post-training Elo: {post_elo:.0f} | Current Elo: {current_elo:.0f} | "
+                print(f"  Post-training Elo: {post_elo:.0f} | Current Elo: {pool_current_elo:.0f} | "
                       f"Threshold: +{arena.elo_threshold:.0f}")
 
             if accepted:
                 if verbose:
                     print("  -> ACCEPTED: Elo improved")
-                current_elo = post_elo
+                pool_current_elo = post_elo
                 accepted_player = GreedyMCTSPlayer(net, mcts_config, name=f"iteration_{iteration:03d}", elo=post_elo)
                 accepted_player.save(arena_dir / f"iteration_{iteration:03d}")
             else:
@@ -453,10 +453,10 @@ def train(
 
             # Pool growth
             if iteration % arena.pool_growth_interval == 0:
-                grow_name = f"iteration_{iteration:03d}"
-                grow_player = GreedyMCTSPlayer(net.copy(), mcts_config, name=grow_name, elo=current_elo)
+                grow_name = f"pool_iteration_{iteration:03d}"
+                grow_player = GreedyMCTSPlayer(net.copy(), mcts_config, name=grow_name, elo=pool_current_elo)
                 grow_player.save(arena_dir / grow_name)
-                pool_players.append((grow_name, grow_player, current_elo))
+                pool_players.append((grow_name, grow_player, pool_current_elo))
 
                 # Evict weakest if over max size
                 if arena.max_pool_size is not None and len(pool_players) > arena.max_pool_size:
@@ -483,7 +483,7 @@ def train(
                 },
                 "elo_arena": {
                     "post_elo": post_elo,
-                    "current_elo": current_elo,
+                    "current_elo": pool_current_elo,
                     "threshold": arena.elo_threshold,
                     "accepted": accepted,
                     "pool_size": len(pool_players),
