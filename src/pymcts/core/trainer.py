@@ -12,9 +12,9 @@ from pymcts.core.base_game import BaseGame
 from pymcts.core.base_neural_net import BaseNeuralNet
 from pymcts.core.config import ArenaConfig, EloArenaConfig, MCTSConfig, PathsConfig, TrainingConfig
 from pymcts.core.data import Example, examples_from_records
-from pymcts.core.players import GreedyMCTSPlayer, RandomPlayer
+from pymcts.core.players import BasePlayer, GreedyMCTSPlayer, MCTSPlayer, RandomPlayer
 from pymcts.elo.config import EloRating, MatchResult, TournamentResult
-from pymcts.elo.rating import compute_elo_ratings
+from pymcts.elo.rating import compute_elo_against_pool, compute_elo_ratings
 from pymcts.core.self_play import batched_self_play
 
 logger = logging.getLogger("bridgit.core.trainer")
@@ -100,6 +100,25 @@ def train(
     elo_reference_pool: list[tuple[str, GreedyMCTSPlayer | RandomPlayer]] = []
     if training_config.elo_tracking:
         elo_reference_pool.append(("random", RandomPlayer(name="random")))
+
+    # Elo pool state (only used with EloArenaConfig)
+    pool_players: list[tuple[str, BasePlayer, float]] = []  # (name, player, frozen_elo)
+    current_elo: float | None = None
+
+    if isinstance(arena, EloArenaConfig):
+        # Save and add RandomPlayer to pool
+        random_player = RandomPlayer(name="random")
+        random_player.elo = 1000.0
+        random_player.save(arena_dir / "random")
+        pool_players.append(("random", random_player, 1000.0))
+
+        # Load initial pool if provided
+        if arena.initial_pool:
+            for player_path in arena.initial_pool:
+                loaded = MCTSPlayer.load(player_path)
+                loaded_elo = loaded.elo if loaded.elo is not None else 1000.0
+                loaded.save(arena_dir / loaded.name)
+                pool_players.append((loaded.name, loaded, loaded_elo))
 
     # game_factory wrapper for examples_from_records (takes config dict)
     def _game_from_config(cfg: dict) -> BaseGame:
@@ -351,7 +370,127 @@ def train(
                 iter_data_path.write_text(json.dumps(iteration_data, indent=2))
 
         elif isinstance(arena, EloArenaConfig):
-            pass  # Implemented in Task 7
+            if verbose:
+                print("\n[3/3] Elo arena evaluation...")
+
+            post_player = GreedyMCTSPlayer(net, mcts_config, name="candidate")
+
+            # Play candidate against every pool player
+            match_results: list[MatchResult] = []
+            pool_ratings: dict[str, float] = {}
+            for pool_name, pool_player, pool_elo in pool_players:
+                pool_ratings[pool_name] = pool_elo
+                records = batched_arena(
+                    player_a=post_player,
+                    player_b=pool_player,
+                    game_factory=game_factory,
+                    num_games=arena.games_per_matchup,
+                    batch_size=arena.games_per_matchup,
+                    swap_players=arena.swap_players,
+                    game_type=game_type,
+                    verbose=verbose,
+                )
+                scores = records.scores
+                wins_a = scores.get("candidate", 0)
+                wins_b = scores.get(pool_name, 0)
+                draws = len(records) - wins_a - wins_b
+                match_results.append(MatchResult(
+                    player_a="candidate",
+                    player_b=pool_name,
+                    wins_a=wins_a,
+                    wins_b=wins_b,
+                    draws=draws,
+                ))
+
+            post_elo = compute_elo_against_pool("candidate", pool_ratings, match_results)
+
+            # First iteration: establish baseline elo
+            if current_elo is None:
+                pre_net = net.copy()
+                pre_net.load_checkpoint(pre_checkpoint)
+                pre_player = GreedyMCTSPlayer(pre_net, mcts_config, name="pre_candidate")
+                pre_match_results: list[MatchResult] = []
+                for pool_name, pool_player, pool_elo in pool_players:
+                    records = batched_arena(
+                        player_a=pre_player,
+                        player_b=pool_player,
+                        game_factory=game_factory,
+                        num_games=arena.games_per_matchup,
+                        batch_size=arena.games_per_matchup,
+                        swap_players=arena.swap_players,
+                        game_type=game_type,
+                        verbose=verbose,
+                    )
+                    scores = records.scores
+                    wins_a = scores.get("pre_candidate", 0)
+                    wins_b = scores.get(pool_name, 0)
+                    draws = len(records) - wins_a - wins_b
+                    pre_match_results.append(MatchResult(
+                        player_a="pre_candidate",
+                        player_b=pool_name,
+                        wins_a=wins_a,
+                        wins_b=wins_b,
+                        draws=draws,
+                    ))
+                current_elo = compute_elo_against_pool("pre_candidate", pool_ratings, pre_match_results)
+
+            accepted = post_elo >= current_elo + arena.elo_threshold
+
+            if verbose:
+                print(f"  Post-training Elo: {post_elo:.0f} | Current Elo: {current_elo:.0f} | "
+                      f"Threshold: +{arena.elo_threshold:.0f}")
+
+            if accepted:
+                if verbose:
+                    print("  -> ACCEPTED: Elo improved")
+                current_elo = post_elo
+                accepted_player = GreedyMCTSPlayer(net, mcts_config, name=f"iteration_{iteration:03d}", elo=post_elo)
+                accepted_player.save(arena_dir / f"iteration_{iteration:03d}")
+            else:
+                if verbose:
+                    print("  -> REJECTED: Elo did not improve enough")
+                net.load_checkpoint(pre_checkpoint)
+
+            # Pool growth
+            if iteration % arena.pool_growth_interval == 0:
+                grow_name = f"iteration_{iteration:03d}"
+                grow_player = GreedyMCTSPlayer(net.copy(), mcts_config, name=grow_name, elo=current_elo)
+                grow_player.save(arena_dir / grow_name)
+                pool_players.append((grow_name, grow_player, current_elo))
+
+                # Evict weakest if over max size
+                if arena.max_pool_size is not None and len(pool_players) > arena.max_pool_size:
+                    weakest_idx = None
+                    weakest_elo = float("inf")
+                    for idx, (name, _, elo) in enumerate(pool_players):
+                        if name == "random":
+                            continue
+                        if elo < weakest_elo:
+                            weakest_elo = elo
+                            weakest_idx = idx
+                    if weakest_idx is not None:
+                        evicted_name = pool_players[weakest_idx][0]
+                        pool_players.pop(weakest_idx)
+                        if verbose:
+                            print(f"  Pool: evicted {evicted_name} (Elo {weakest_elo:.0f})")
+
+            # Save iteration data
+            iteration_data = {
+                "iteration": iteration,
+                "training": {
+                    "num_examples": len(all_examples),
+                    "metrics": train_metrics,
+                },
+                "elo_arena": {
+                    "post_elo": post_elo,
+                    "current_elo": current_elo,
+                    "threshold": arena.elo_threshold,
+                    "accepted": accepted,
+                    "pool_size": len(pool_players),
+                },
+            }
+            iter_data_path = iter_dir / "iteration_data.json"
+            iter_data_path.write_text(json.dumps(iteration_data, indent=2))
 
         if verbose:
             print()
