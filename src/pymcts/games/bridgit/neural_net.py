@@ -43,6 +43,8 @@ class BridgitNet(BaseNeuralNet):
         board_config: BoardConfig = BoardConfig(),
         net_config: NeuralNetConfig = NeuralNetConfig(),
     ):
+        if net_config.device != "auto":
+            self._force_device = torch.device(net_config.device)
         super().__init__()
         self.board_config = board_config
         self.net_config = net_config
@@ -67,8 +69,8 @@ class BridgitNet(BaseNeuralNet):
         self.value_fc1 = nn.Linear(g * g, 64)
         self.value_fc2 = nn.Linear(64, 1)
 
-    def encode(self, state: BridgitGameState) -> torch.Tensor:
-        """Convert BridgitGameState to (4, g, g) tensor.
+    def _encode_numpy(self, state: BridgitGameState) -> np.ndarray:
+        """Convert BridgitGameState to (4, g, g) numpy array.
 
         Channel 0: current player's cells (HORIZONTAL = -1 in canonical form)
         Channel 1: opponent's cells (VERTICAL = 1 in canonical form)
@@ -78,23 +80,26 @@ class BridgitNet(BaseNeuralNet):
         board = state.board
         g = board.shape[0]
 
-        # Channel 0: current player (HORIZONTAL = -1)
         ch0 = (board == -1).astype(np.float32)
-        # Channel 1: opponent (VERTICAL = 1)
         ch1 = (board == 1).astype(np.float32)
 
-        # Channel 2: playability mask — empty interior crossings
+        # Vectorized crossing mask
         ch2 = np.zeros((g, g), dtype=np.float32)
-        for r in range(1, g - 1):
-            for c in range(1, g - 1):
-                if (r + c) % 2 == 0 and board[r, c] == 0:
-                    ch2[r, c] = 1.0
+        inner = board[1:g-1, 1:g-1]
+        rows_plus_cols = np.add.outer(np.arange(1, g-1), np.arange(1, g-1))
+        ch2[1:g-1, 1:g-1] = ((rows_plus_cols % 2 == 0) & (inner == 0)).astype(np.float32)
 
-        # Channel 3: moves left constant plane
         ch3 = np.full((g, g), state.moves_left_in_turn, dtype=np.float32)
 
-        tensor = np.stack([ch0, ch1, ch2, ch3], axis=0)
-        return torch.from_numpy(tensor)
+        return np.stack([ch0, ch1, ch2, ch3], axis=0)
+
+    def encode(self, state: BridgitGameState) -> torch.Tensor:
+        """Convert BridgitGameState to (4, g, g) tensor."""
+        return torch.from_numpy(self._encode_numpy(state))
+
+    def encode_batch(self, states: list[BridgitGameState]) -> torch.Tensor:
+        """Batch encode: stack numpy arrays first, convert to one tensor."""
+        return torch.from_numpy(np.stack([self._encode_numpy(s) for s in states]))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass. Returns (log_policy, value).
@@ -130,8 +135,18 @@ class BridgitNet(BaseNeuralNet):
 
     def load_checkpoint(self, path: str) -> None:
         """Load model weights from checkpoint file."""
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.load_state_dict(checkpoint["model_state_dict"])
+
+    @classmethod
+    def from_checkpoint(cls, path: str) -> "BridgitNet":
+        """Create a BridgitNet from a checkpoint file, using saved configs."""
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        board_config = BoardConfig(**checkpoint["board_config"])
+        net_config = NeuralNetConfig(**checkpoint["net_config"])
+        net = cls(board_config=board_config, net_config=net_config)
+        net.load_state_dict(checkpoint["model_state_dict"])
+        return net
 
     def copy(self) -> "BridgitNet":
         """Return a deep copy of this network."""

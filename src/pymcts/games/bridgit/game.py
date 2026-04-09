@@ -144,10 +144,9 @@ class BridgitGame(Board2DGame):
             board = -self._board.T
 
         mask = np.zeros((g, g), dtype=bool)
-        for r in range(1, g - 1):
-            for c in range(1, g - 1):
-                if (r + c) % 2 == 0 and board[r, c] == 0:
-                    mask[r, c] = True
+        inner = board[1:g-1, 1:g-1]
+        rows_plus_cols = np.add.outer(np.arange(1, g-1), np.arange(1, g-1))
+        mask[1:g-1, 1:g-1] = (rows_plus_cols % 2 == 0) & (inner == 0)
 
         return torch.from_numpy(mask.flatten())
 

@@ -1,6 +1,5 @@
 """Game-agnostic Monte Carlo Tree Search with neural network guidance."""
 
-import itertools
 import logging
 import math
 
@@ -49,50 +48,55 @@ class MCTSNode:
         """True when all moves have been turned into child nodes."""
         return self.is_expanded and not self.unexpanded_moves
 
-    def _unexpanded_ucb(self, action: int, prior: float, c_puct: float) -> float:
-        """UCB score for an unexpanded move (visit_count=0, q=0)."""
-        return c_puct * prior * math.sqrt(self.visit_count)
-
     def best_child_or_expand(self, c_puct: float) -> "MCTSNode":
         """Select the best child, possibly creating one from unexpanded moves.
 
         Compares UCB scores of existing children with potential scores of
         unexpanded moves. If an unexpanded move wins, creates the child node.
         """
-        children_scores = (
-            (child.ucb_score(c_puct), child, None)
-            for child in self.children.values()
-        )
-        unexpanded_scores = (
-            (self._unexpanded_ucb(action, prior, c_puct), None, (action, prior))
-            for action, prior in self.unexpanded_moves.items()
-        )
-        best_score, best_child, best_unexpanded = max(
-            itertools.chain(children_scores, unexpanded_scores),
-            key=lambda x: x[0],
-        )
+        best_score = -math.inf
+        best_child = None
+        best_unexpanded_action = -1
+        best_unexpanded_prior = 0.0
 
-        if best_unexpanded is not None:
-            action, prior = best_unexpanded
+        parent_visits = self.visit_count
+        sqrt_parent = math.sqrt(parent_visits)
+        my_player = self.game.current_player
+
+        # Score existing children — inline UCB calculation
+        for child in self.children.values():
+            vc = child.visit_count
+            if vc == 0:
+                q = 0.0
+            else:
+                q = child.value_sum / vc
+                if child.game.current_player != my_player:
+                    q = -q
+            score = q + c_puct * child.prior * sqrt_parent / (1 + vc)
+            if score > best_score:
+                best_score = score
+                best_child = child
+                best_unexpanded_action = -1
+
+        # Score unexpanded moves (visit_count=0, q=0)
+        explore_base = c_puct * sqrt_parent
+        for action, prior in self.unexpanded_moves.items():
+            score = explore_base * prior
+            if score > best_score:
+                best_score = score
+                best_child = None
+                best_unexpanded_action = action
+                best_unexpanded_prior = prior
+
+        if best_unexpanded_action >= 0:
             child_game = self.game.copy()
-            child_game.make_action(action)
-            child = MCTSNode(child_game, parent=self, prior=prior)
-            self.children[action] = child
-            del self.unexpanded_moves[action]
+            child_game.make_action(best_unexpanded_action)
+            child = MCTSNode(child_game, parent=self, prior=best_unexpanded_prior)
+            self.children[best_unexpanded_action] = child
+            del self.unexpanded_moves[best_unexpanded_action]
             return child
 
         return best_child
-
-    def ucb_score(self, c_puct: float) -> float:
-        """PUCT selection score from the parent's perspective."""
-        if self.parent is None:
-            return 0.0
-
-        same_player = self.game.current_player == self.parent.game.current_player
-        q = self.q_value if same_player else -self.q_value
-        parent_visits = self.parent.visit_count
-        exploration = c_puct * self.prior * math.sqrt(parent_visits) / (1 + self.visit_count)
-        return q + exploration
 
     def best_move(self) -> int:
         """Return the most-visited child's action."""
@@ -123,40 +127,37 @@ class MCTS:
         self.net = net
         self.mcts_config = mcts_config
 
-    def _predict_batch(self, states: list) -> list[tuple[torch.Tensor, float]]:
+    def _predict_batch(self, states: list) -> list[tuple[np.ndarray, float]]:
         """Run neural net on a batch of game states."""
         log_policies, values = self.net.predict_batch(states)
-        policies = torch.exp(log_policies).cpu()
-        vals = values.cpu()
-        return [
-            (policies[i], vals[i].item())
-            for i in range(len(states))
-        ]
+        policies = torch.exp(log_policies).numpy()
+        value_list = values.tolist()
+        return list(zip(policies, value_list))
 
     @staticmethod
-    def _set_priors(node: MCTSNode, policy: torch.Tensor, value: float) -> float:
+    def _set_priors(node: MCTSNode, policy: np.ndarray, value: float) -> float:
         """Store masked/renormalized priors in node.unexpanded_moves."""
         if node.game.is_over:
             node.is_expanded = True
             return 1.0
 
-        valid_mask = node.game.to_mask().float()
+        mask = node.game.to_mask().numpy()
 
-        policy = policy * valid_mask
+        policy = policy * mask
         policy_sum = policy.sum()
         if policy_sum > 0:
             policy = policy / policy_sum
         else:
-            total = valid_mask.sum()
+            total = mask.sum()
             if total > 0:
-                policy = valid_mask / total
+                policy = mask.astype(np.float32) / total
             else:
                 node.is_expanded = True
                 return value
 
-        for idx in torch.nonzero(valid_mask, as_tuple=False).squeeze(-1):
-            action = idx.item()
-            node.unexpanded_moves[action] = policy[action].item()
+        indices = np.nonzero(mask)[0]
+        priors = policy[indices]
+        node.unexpanded_moves = dict(zip(indices.tolist(), priors.tolist()))
 
         node.is_expanded = True
         return value

@@ -14,3 +14,4 @@ class BoardConfig(BaseModel):
 class NeuralNetConfig(BaseModel):
     num_channels: int = 64
     num_res_blocks: int = 4
+    device: str = "auto"
