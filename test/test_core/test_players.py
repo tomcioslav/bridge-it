@@ -1,5 +1,5 @@
 from test.test_core.test_mcts import TicTacToe, DummyNet
-from pymcts.core.players import BasePlayer, RandomPlayer, MCTSPlayer
+from pymcts.core.players import BasePlayer, RandomPlayer, MCTSPlayer, GreedyMCTSPlayer
 from pymcts.core.arena import batched_arena
 from pymcts.core.config import MCTSConfig
 
@@ -147,3 +147,12 @@ class TestRandomPlayerSaveLoad:
         game = TicTacToe()
         action = loaded.get_action(game)
         assert action in game.valid_actions()
+
+
+class TestGreedyMCTSPlayerElo:
+    def test_elo_passthrough(self):
+        net = DummyNet()
+        config = MCTSConfig(num_simulations=5)
+        player = GreedyMCTSPlayer(net, config, name="greedy", elo=1200.0)
+        assert player.elo == 1200.0
+        assert player.temperature == 0.0

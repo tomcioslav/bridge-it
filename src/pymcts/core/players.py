@@ -181,5 +181,5 @@ class MCTSPlayer(BasePlayer):
 
 
 class GreedyMCTSPlayer(MCTSPlayer):
-    def __init__(self, net: BaseNeuralNet, mcts_config: MCTSConfig, name: str | None = None):
-        super().__init__(net, mcts_config, temperature=0.0, name=name)
+    def __init__(self, net: BaseNeuralNet, mcts_config: MCTSConfig, name: str | None = None, elo: float | None = None):
+        super().__init__(net, mcts_config, temperature=0.0, name=name, elo=elo)
