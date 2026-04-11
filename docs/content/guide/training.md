@@ -6,21 +6,28 @@ This guide covers how to configure and run the AlphaZero training pipeline.
 
 ```python
 from pymcts.core.trainer import train
+from pymcts.arena import SinglePlayerArena
+from pymcts.arena.config import SinglePlayerArenaConfig
+from pathlib import Path
+
+game_factory = lambda: MyGame()
+arena_config = SinglePlayerArenaConfig(num_games=40)
+self_play_arena = SinglePlayerArena(arena_config, game_factory, arena_dir=Path("trainings/self_play"))
+eval_arena = SinglePlayerArena(arena_config, game_factory, arena_dir=Path("trainings/eval"))
 
 train(
-    game_factory=lambda: MyGame(),       # creates fresh game instances
+    game_factory=game_factory,           # creates fresh game instances
     net=my_net,                          # neural network to train
     mcts_config=mcts_config,             # MCTS settings
     training_config=training_config,     # training loop settings
-    arena=arena_config,                  # model comparison settings
-    game_type="mygame",                  # label for saved records
-    game_config=my_config.model_dump(),  # saved alongside game records
+    self_play_arena=self_play_arena,     # arena for self-play games
+    eval_arena=eval_arena,               # arena for model evaluation
 )
 ```
 
 `game_factory` is a callable that returns a new game instance. This is called for every self-play game and every arena game.
 
-The `arena` parameter accepts either `ArenaConfig` (head-to-head evaluation) or `EloArenaConfig` (Elo pool-based evaluation). See below for details on both.
+The `self_play_arena` parameter controls how self-play games are collected. The `eval_arena` parameter controls how the new model is compared against the previous version. Both accept `SinglePlayerArena`, `MultiPlayerArena`, or `EloArena` instances. See below for details on arena configurations.
 
 ## Configuration
 
@@ -64,14 +71,28 @@ training_config = TrainingConfig(
 )
 ```
 
-### ArenaConfig
+### SinglePlayerArenaConfig
 
 Controls head-to-head model comparison. The new model plays against the previous version and must exceed the win rate threshold to be accepted.
 
 ```python
-from pymcts.core.config import ArenaConfig
+from pymcts.arena.config import SinglePlayerArenaConfig
 
-arena_config = ArenaConfig(
+arena_config = SinglePlayerArenaConfig(
+    num_games=40,       # games to play per evaluation
+    threshold=0.55,     # win rate needed to accept new model
+    swap_players=True,  # play both sides for fairness
+)
+```
+
+### MultiPlayerArenaConfig
+
+Controls multi-player arena evaluation with more than two competitors.
+
+```python
+from pymcts.arena.config import MultiPlayerArenaConfig
+
+arena_config = MultiPlayerArenaConfig(
     num_games=40,       # games to play per evaluation
     threshold=0.55,     # win rate needed to accept new model
     swap_players=True,  # play both sides for fairness
@@ -83,7 +104,7 @@ arena_config = ArenaConfig(
 Controls Elo pool-based evaluation. Instead of head-to-head comparison, the new model plays against a pool of reference players and must achieve a higher Elo rating than the current model.
 
 ```python
-from pymcts.core.config import EloArenaConfig
+from pymcts.arena.config import EloArenaConfig
 
 elo_arena = EloArenaConfig(
     games_per_matchup=40,       # games against each pool player
@@ -106,8 +127,8 @@ elo_arena = EloArenaConfig(
 )
 ```
 
-!!! tip "When to use EloArenaConfig"
-    Use `EloArenaConfig` when head-to-head comparison is too noisy or when you want
+!!! tip "When to use EloArena"
+    Use `EloArena` with `EloArenaConfig` when head-to-head comparison is too noisy or when you want
     to measure improvement against a diverse field rather than just the previous model.
 
 ## Checkpoints
@@ -155,16 +176,25 @@ arena/
 Load the checkpoint and call `train()` again:
 
 ```python
+from pymcts.arena import SinglePlayerArena
+from pymcts.arena.config import SinglePlayerArenaConfig
+from pathlib import Path
+
 net = MyNet()
 net.load_checkpoint("trainings/run_.../iteration_010/post_training.pt")
 
+game_factory = lambda: MyGame()
+arena_config = SinglePlayerArenaConfig(num_games=40)
+self_play_arena = SinglePlayerArena(arena_config, game_factory, arena_dir=Path("trainings/self_play"))
+eval_arena = SinglePlayerArena(arena_config, game_factory, arena_dir=Path("trainings/eval"))
+
 train(
-    game_factory=lambda: MyGame(),
+    game_factory=game_factory,
     net=net,
     mcts_config=mcts_config,
     training_config=TrainingConfig(num_iterations=20),  # 20 more
-    arena=arena_config,
-    game_type="mygame",
+    self_play_arena=self_play_arena,
+    eval_arena=eval_arena,
 )
 ```
 
@@ -187,7 +217,7 @@ For a new game, start with conservative settings and increase:
 ```python
 MCTSConfig(num_simulations=50)
 TrainingConfig(num_iterations=10, num_self_play_games=20, num_epochs=5)
-ArenaConfig(num_games=20, threshold=0.55)
+SinglePlayerArenaConfig(num_games=20, threshold=0.55)
 ```
 
 This runs fast and lets you verify the pipeline works.
@@ -206,8 +236,8 @@ Once you see improvement:
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Training loss doesn't decrease | Learning rate too low, or too few examples | Increase `num_self_play_games` or `learning_rate` |
-| Arena never accepts (ArenaConfig) | Threshold too high, or not enough training | Lower `threshold` to 0.52, increase `num_epochs` |
-| Arena always accepts (ArenaConfig) | Threshold too low | Raise `threshold` to 0.55-0.60 |
+| Arena never accepts (SinglePlayerArenaConfig) | Threshold too high, or not enough training | Lower `threshold` to 0.52, increase `num_epochs` |
+| Arena always accepts (SinglePlayerArenaConfig) | Threshold too low | Raise `threshold` to 0.55-0.60 |
 | Elo never improves (EloArenaConfig) | Threshold too high, or pool too strong | Lower `elo_threshold`, or start with a fresh pool |
 | Training is slow | Too many MCTS simulations | Reduce `num_simulations`, increase `num_parallel_leaves` |
 | Model doesn't improve after many iterations | Network too small, or too few simulations | Increase network size or `num_simulations` |
