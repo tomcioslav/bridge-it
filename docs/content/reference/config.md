@@ -10,14 +10,16 @@ All configuration classes used by the engine.
 
 ::: pymcts.core.config.TrainingConfig
 
-## ArenaConfig
-
-::: pymcts.core.config.ArenaConfig
-
-## EloArenaConfig
-
-::: pymcts.core.config.EloArenaConfig
-
 ## PathsConfig
 
 ::: pymcts.core.config.PathsConfig
+
+## Arena Configuration
+
+Arena configs have moved to the `pymcts.arena.config` module:
+
+::: pymcts.arena.config.SinglePlayerArenaConfig
+
+::: pymcts.arena.config.MultiPlayerArenaConfig
+
+::: pymcts.arena.config.EloArenaConfig
