@@ -7,7 +7,7 @@ from typing import Callable
 
 from pydantic import BaseModel, ConfigDict
 
-from pymcts.core.arena import batched_arena
+from pymcts.arena.engine import batched_arena
 from pymcts.core.base_game import BaseGame
 from pymcts.core.players import BasePlayer, MCTSPlayer, RandomPlayer
 from pymcts.elo.config import (
