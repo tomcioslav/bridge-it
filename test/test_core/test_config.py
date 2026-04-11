@@ -1,4 +1,4 @@
-from pymcts.core.config import EloArenaConfig
+from pymcts.arena.config import EloArenaConfig
 
 
 class TestEloArenaConfig:

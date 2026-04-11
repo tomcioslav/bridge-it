@@ -1,7 +1,7 @@
 """Smoke test: run a tiny training iteration with the generic engine + Bridgit."""
 
 from pymcts.core.self_play import batched_self_play
-from pymcts.core.arena import batched_arena
+from pymcts.arena import batched_arena
 from pymcts.core.players import RandomPlayer, GreedyMCTSPlayer
 from pymcts.core.data import examples_from_records
 from pymcts.core.config import MCTSConfig

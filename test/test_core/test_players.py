@@ -1,6 +1,6 @@
 from test.test_core.test_mcts import TicTacToe, DummyNet
 from pymcts.core.players import BasePlayer, RandomPlayer, MCTSPlayer, GreedyMCTSPlayer
-from pymcts.core.arena import batched_arena
+from pymcts.arena import batched_arena
 from pymcts.core.config import MCTSConfig
 
 
