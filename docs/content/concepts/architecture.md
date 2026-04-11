@@ -8,7 +8,11 @@ pymcts separates the **engine** (game-agnostic) from the **game** (game-specific
 ┌─────────────────────────────────────────────────────┐
 │                    Engine (core/)                     │
 │                                                      │
-│  MCTS ──> Self-Play ──> Trainer ──> Arena            │
+│  MCTS ──> Self-Play ──> Trainer                      │
+│                            │                         │
+│                            ▼                         │
+│                      Arena (arena/)                   │
+│           SinglePlayer / MultiPlayer / Elo            │
 │                                                      │
 │  Sees only:                                          │
 │    - Actions as integers (0, 1, 2, ...)              │
