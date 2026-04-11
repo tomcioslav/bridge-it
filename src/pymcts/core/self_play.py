@@ -1,10 +1,10 @@
 """Batched self-play: run N games concurrently with batched neural net inference."""
 
 import logging
-from dataclasses import dataclass, field
 from typing import Callable
 
 import torch
+from pydantic import BaseModel, ConfigDict
 from tqdm.auto import tqdm
 
 from pymcts.core.base_game import BaseGame
@@ -16,11 +16,12 @@ from pymcts.core.mcts import MCTS
 logger = logging.getLogger("pymcts.core.self_play")
 
 
-@dataclass
-class _GameSlot:
+class _GameSlot(BaseModel):
     """A single concurrent game being played during self-play."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     game: BaseGame
-    history: list[MoveRecord] = field(default_factory=list)
+    history: list[MoveRecord] = []
 
 
 def _make_slots(game_factory: Callable[[], BaseGame], count: int) -> list[_GameSlot]:

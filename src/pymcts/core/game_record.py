@@ -1,6 +1,5 @@
 """Generic game recording types."""
 
-from dataclasses import dataclass
 from typing import Annotated, Any
 
 import torch
@@ -58,8 +57,7 @@ class GameRecord(BaseModel):
         return f"{names}: {winner} wins in {self.num_moves} moves"
 
 
-@dataclass
-class EvalResult:
+class EvalResult(BaseModel):
     """Evaluation statistics for a player in an arena run."""
     wins: int
     losses: int
