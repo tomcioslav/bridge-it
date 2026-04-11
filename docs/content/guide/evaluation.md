@@ -7,7 +7,7 @@ This guide covers how to compare models, run arena matches, and analyze game rec
 The `batched_arena` function pits two players against each other over multiple games.
 
 ```python
-from pymcts.core.arena import batched_arena
+from pymcts.arena import batched_arena
 from pymcts.core.players import GreedyMCTSPlayer, RandomPlayer
 from pymcts.core.config import MCTSConfig
 
